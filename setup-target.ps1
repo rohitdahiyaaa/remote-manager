@@ -7,26 +7,30 @@
     This script:
     1. Installs & starts OpenSSH Server
     2. Downloads client files from your GitHub repo
-    3. Generates an SSH keypair for the tunnel
-    4. Asks for a unique device name and port
-    5. Configures and starts the reverse tunnel
-    6. Installs the tunnel as a boot service
-    7. Outputs the public key to add to the VPS
+    3. Saves the shared SSH key for the tunnel
+    4. Configures and starts the reverse tunnel
+    5. Installs the tunnel as a boot service
 
 .NOTES
     Run as Administrator on the target PC.
-    Usage: powershell -ExecutionPolicy Bypass -File setup-target.ps1
+    Usage: & ([scriptblock]::Create((irm "URL"))) -DeviceName "PC1" -Port 2201 -SharedKey "BASE64STRING"
 #>
 
+param (
+    [Parameter(Mandatory=$true)] [string]$DeviceName,
+    [Parameter(Mandatory=$true)] [string]$Port,
+    [Parameter(Mandatory=$true)] [string]$SharedKey
+)
+
 # ============================================================
-# CONFIGURATION — EDIT THESE BEFORE UPLOADING TO GITHUB
+# CONFIGURATION
 # ============================================================
 $VPS_HOST     = "130.210.14.177"
 $VPS_USER     = "ubuntu"
 $VPS_SSH_PORT = 22
 
-# GitHub raw file URLs (update after uploading to your repo)
-$GITHUB_RAW_BASE = "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/windows-client"
+# GitHub raw file URLs
+$GITHUB_RAW_BASE = "https://raw.githubusercontent.com/rohitdahiyaaa/remote-manager/windows-client"
 $TUNNEL_SCRIPT_URL  = "$GITHUB_RAW_BASE/reverse-tunnel.ps1"
 $INSTALL_SCRIPT_URL = "$GITHUB_RAW_BASE/install-service.ps1"
 
@@ -42,11 +46,15 @@ function Write-Fail { param($msg) Write-Host "    [FAIL] $msg" -ForegroundColor 
 function Write-Info { param($msg) Write-Host "    $msg" -ForegroundColor Gray }
 
 $script:stepNum = 1
+$PC_NAME = $DeviceName
+$REVERSE_PORT = $Port
 
 Write-Host ""
 Write-Host "=============================================" -ForegroundColor Yellow
 Write-Host "   Remote Management — Target Device Setup   " -ForegroundColor Yellow
 Write-Host "=============================================" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "  Device: $PC_NAME | Port: $REVERSE_PORT" -ForegroundColor White
 Write-Host ""
 
 # ── Step 1: Check Admin ─────────────────────────────────────
@@ -56,7 +64,6 @@ $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIde
 if (-not $isAdmin) {
     Write-Fail "This script must be run as Administrator!"
     Write-Host "    Right-click PowerShell -> Run as Administrator" -ForegroundColor Yellow
-    Read-Host "Press Enter to exit"
     exit 1
 }
 Write-OK "Running as Administrator"
@@ -74,7 +81,6 @@ if ($sshCapability.State -eq "Installed") {
         Write-OK "OpenSSH Server installed"
     } else {
         Write-Fail "Failed to install OpenSSH Server"
-        Read-Host "Press Enter to exit"
         exit 1
     }
 }
@@ -90,27 +96,10 @@ if ($sshdStatus.Status -eq "Running") {
     Write-OK "SSH Server is running (StartType: Automatic)"
 } else {
     Write-Fail "SSH Server failed to start. Status: $($sshdStatus.Status)"
-    Read-Host "Press Enter to exit"
     exit 1
 }
 
-# ── Step 4: Ask for device info ─────────────────────────────
-Write-Step "Configuring device identity..."
-
-$defaultName = $env:COMPUTERNAME
-$PC_NAME = Read-Host "    Enter a name for this device (default: $defaultName)"
-if ([string]::IsNullOrWhiteSpace($PC_NAME)) { $PC_NAME = $defaultName }
-
-$REVERSE_PORT = Read-Host "    Enter the unique port number for this device (e.g. 2201, 2202)"
-if ([string]::IsNullOrWhiteSpace($REVERSE_PORT)) {
-    Write-Fail "Port number is required!"
-    Read-Host "Press Enter to exit"
-    exit 1
-}
-
-Write-OK "Device: $PC_NAME | Port: $REVERSE_PORT"
-
-# ── Step 5: Create install directory ────────────────────────
+# ── Step 4: Create install directory ────────────────────────
 Write-Step "Creating install directory..."
 
 if (-not (Test-Path $INSTALL_DIR)) {
@@ -118,7 +107,7 @@ if (-not (Test-Path $INSTALL_DIR)) {
 }
 Write-OK "Directory: $INSTALL_DIR"
 
-# ── Step 6: Download scripts from GitHub ────────────────────
+# ── Step 5: Download scripts from GitHub ────────────────────
 Write-Step "Downloading client scripts from GitHub..."
 
 try {
@@ -132,13 +121,11 @@ try {
 } catch {
     Write-Fail "Failed to download from GitHub: $_"
     Write-Host ""
-    Write-Host "    Make sure you have uploaded the files to your GitHub repo" -ForegroundColor Yellow
-    Write-Host "    and updated the GITHUB_RAW_BASE URL at the top of this script." -ForegroundColor Yellow
-    Read-Host "Press Enter to exit"
+    Write-Host "    Make sure the GitHub repo is public and the URLs are correct." -ForegroundColor Yellow
     exit 1
 }
 
-# ── Step 7: Configure the tunnel script ─────────────────────
+# ── Step 6: Configure the tunnel script ─────────────────────
 Write-Step "Configuring reverse-tunnel.ps1 with your device settings..."
 
 $tunnelScript = Get-Content "$INSTALL_DIR\reverse-tunnel.ps1" -Raw
@@ -154,7 +141,7 @@ $tunnelScript = $tunnelScript -replace '\$SSH_KEY_PATH\s*=\s*"[^"]*"',    "`$SSH
 Set-Content -Path "$INSTALL_DIR\reverse-tunnel.ps1" -Value $tunnelScript
 Write-OK "Tunnel configured: VPS=$VPS_HOST, Port=$REVERSE_PORT, Name=$PC_NAME"
 
-# ── Step 8: Generate SSH Key ────────────────────────────────
+# ── Step 7: Save Shared SSH Key ─────────────────────────────
 Write-Step "Setting up SSH key authentication..."
 
 $keyDir = Split-Path $SSH_KEY_PATH -Parent
@@ -162,30 +149,39 @@ if (-not (Test-Path $keyDir)) {
     New-Item -ItemType Directory -Path $keyDir -Force | Out-Null
 }
 
-if (Test-Path $SSH_KEY_PATH) {
-    Write-OK "SSH key already exists at $SSH_KEY_PATH"
-} else {
-    Write-Info "Generating new SSH keypair..."
-    ssh-keygen -t ed25519 -f $SSH_KEY_PATH -N '""' -C "tunnel-$PC_NAME" 2>&1 | Out-Null
-    if (Test-Path $SSH_KEY_PATH) {
-        Write-OK "SSH keypair generated"
-    } else {
-        Write-Fail "Failed to generate SSH key"
-        Read-Host "Press Enter to exit"
-        exit 1
-    }
+try {
+    $keyBytes = [System.Convert]::FromBase64String($SharedKey)
+    [System.IO.File]::WriteAllBytes($SSH_KEY_PATH, $keyBytes)
+    icacls $SSH_KEY_PATH /inheritance:r /grant:r "$($env:USERNAME):F" | Out-Null
+    Write-OK "Shared SSH key saved and configured!"
+} catch {
+    Write-Fail "Failed to decode shared key. Make sure the Base64 string is correct."
+    exit 1
 }
 
-$publicKey = Get-Content "$SSH_KEY_PATH.pub"
-
-# ── Step 9: Install as boot service ─────────────────────────
+# ── Step 8: Install as boot service ─────────────────────────
 Write-Step "Installing tunnel as Windows boot service..."
 
 & "$INSTALL_DIR\install-service.ps1" -ScriptPath "$INSTALL_DIR\reverse-tunnel.ps1"
 
 Write-OK "Boot service installed"
 
-# ── Step 10: Display summary & public key ────────────────────
+# ── Step 9: Start tunnel and verify ─────────────────────────
+Write-Step "Starting reverse tunnel..."
+
+Write-Info "Testing SSH connection to VPS..."
+$result = ssh -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -i $SSH_KEY_PATH -p $VPS_SSH_PORT "$VPS_USER@$VPS_HOST" "echo CONNECTION_OK" 2>&1
+
+if ($result -match "CONNECTION_OK") {
+    Write-OK "Connection to VPS successful!"
+    Start-ScheduledTask -TaskName "ReverseTunnelToVPS" -ErrorAction SilentlyContinue
+    Write-OK "Tunnel started!"
+} else {
+    Write-Fail "Connection test failed. The tunnel will retry automatically on boot."
+    Write-Info "Check that the shared key's public key is in the VPS authorized_keys."
+}
+
+# ── Step 10: Display summary ────────────────────────────────
 Write-Step "Setup complete!"
 
 Write-Host ""
@@ -199,50 +195,5 @@ Write-Host "  VPS Target:   $VPS_USER@$VPS_HOST" -ForegroundColor White
 Write-Host "  Install Dir:  $INSTALL_DIR" -ForegroundColor White
 Write-Host "  SSH Key:      $SSH_KEY_PATH" -ForegroundColor White
 Write-Host ""
-Write-Host "=============================================" -ForegroundColor Yellow
-Write-Host "   ACTION REQUIRED: Add this public key      " -ForegroundColor Yellow
-Write-Host "   to your VPS authorized_keys file           " -ForegroundColor Yellow
-Write-Host "=============================================" -ForegroundColor Yellow
+Write-Host "  This device will now auto-connect on every boot." -ForegroundColor Green
 Write-Host ""
-Write-Host "  $publicKey" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "  On your VPS run:" -ForegroundColor Gray
-Write-Host "  echo '$publicKey' >> ~/.ssh/authorized_keys" -ForegroundColor White
-Write-Host ""
-Write-Host "=============================================" -ForegroundColor Yellow
-
-# Copy public key to clipboard
-$publicKey | Set-Clipboard
-Write-Host "  Public key has been copied to your clipboard!" -ForegroundColor Green
-Write-Host ""
-
-# ── Step 11: Test connection ─────────────────────────────────
-$testNow = Read-Host "Do you want to test the VPS connection now? (y/n)"
-if ($testNow -eq "y") {
-    Write-Host ""
-    Write-Info "Testing SSH connection to VPS..."
-    Write-Info "(This will fail if you haven't added the public key to VPS yet)"
-    Write-Host ""
-
-    $result = ssh -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -i $SSH_KEY_PATH -p $VPS_SSH_PORT "$VPS_USER@$VPS_HOST" "echo CONNECTION_OK" 2>&1
-
-    if ($result -match "CONNECTION_OK") {
-        Write-OK "Connection to VPS successful!"
-        Write-Host ""
-
-        # Start the tunnel now
-        $startNow = Read-Host "Start the reverse tunnel now? (y/n)"
-        if ($startNow -eq "y") {
-            Start-ScheduledTask -TaskName "ReverseTunnelToVPS"
-            Write-OK "Tunnel started! Your device should now appear ONLINE in the VPS panel."
-        }
-    } else {
-        Write-Fail "Connection failed. Make sure the public key is added to the VPS."
-        Write-Info "After adding the key, start the tunnel with:"
-        Write-Host "  Start-ScheduledTask -TaskName 'ReverseTunnelToVPS'" -ForegroundColor White
-    }
-}
-
-Write-Host ""
-Write-Host "Done! You can close this window." -ForegroundColor Green
-Read-Host "Press Enter to exit"
